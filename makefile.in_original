@@ -63,6 +63,10 @@ endif
 GLIBC_MULTILIB_NAMES := @glibc_multilib_names@
 GCC_CHECKING_FLAGS := @gcc_checking@
 
+MUSL_MULTILIB_NAMES := @musl_multilib_names@
+
+
+
 XLEN := $(shell echo $(WITH_ARCH) | tr A-Z a-z | sed 's/.*rv\([0-9]*\).*/\1/')
 ifneq ($(XLEN),32)
 	XLEN := 64
@@ -95,6 +99,7 @@ NEWLIB_NANO_TARGET_BOARDS ?= $(shell echo "$(NEWLIB_MULTILIB_NAMES)" | sed 's!\(
 MUSL_TARGET_FLAGS := $(MUSL_TARGET_FLAGS_EXTRA)
 MUSL_CC_FOR_TARGET ?= $(MUSL_TUPLE)-gcc
 MUSL_CXX_FOR_TARGET ?= $(MUSL_TUPLE)-g++
+MUSL_TARGET_BOARDS ?= $(shell echo "$(MUSL_MULTILIB_NAMES)" | sed 's!\([_a-z0-9]*\)-\([_a-z0-9]*\)!riscv-sim/-march=\1/-mabi=\2/@cmodel@!g')
 
 CONFIGURE_HOST   = @configure_host@
 
@@ -105,6 +110,7 @@ musl: stamps/build-gcc-musl-stage2
 ifeq (@enable_gdb@,--enable-gdb)
 newlib: stamps/build-gdb-newlib
 linux: stamps/build-gdb-linux
+musl: stamps/build-gdb-musl
 endif
 linux-native: stamps/build-gcc-linux-native
 
@@ -112,11 +118,20 @@ linux-native: stamps/build-gcc-linux-native
 build-binutils: stamps/build-binutils-@default_target@
 build-gdb: stamps/build-gdb-@default_target@
 build-gcc%: stamps/build-gcc-@default_target@-stage%
+
+
+
+
 ifeq (@default_target@,linux)
 build-libc: $(addprefix stamps/build-glibc-linux-,$(GLIBC_MULTILIB_NAMES))
 else
+
+ifeq (@default_target@,musl)
+build-libc: $(addprefix stamps/build-musl-linux-,$(MUSL_MULTILIB_NAMES))
+else
 build-libc: stamps/build-newlib stamps/build-newlib-nano \
 	stamps/merge-newlib-nano
+endif
 endif
 build-qemu: stamps/build-qemu
 
@@ -669,6 +684,30 @@ stamps/build-binutils-musl: $(BINUTILS_SRCDIR) $(BINUTILS_SRC_GIT) stamps/check-
 	$(MAKE) -C $(notdir $@)
 	$(MAKE) -C $(notdir $@) install
 	mkdir -p $(dir $@) && touch $@
+	
+stamps/build-gdb-musl: $(GDB_SRCDIR) $(GDB_SRC_GIT)
+	rm -rf $@ $(notdir $@)
+	mkdir $(notdir $@)
+# CC_FOR_TARGET is required for the ld testsuite.
+	cd $(notdir $@) && CC_FOR_TARGET=$(MUSL_CC_FOR_TARGET) $</configure \
+		--target=$(MUSL_TUPLE) \
+		$(CONFIGURE_HOST) \
+		--prefix=$(INSTALL_DIR) \
+		--with-sysroot=$(SYSROOT) \
+		$(MULTILIB_FLAGS) \
+		@with_guile@ \
+		--disable-werror \
+		--disable-nls \
+		$(GDB_TARGET_FLAGS) \
+		--enable-gdb \
+		--disable-gas \
+		--disable-binutils \
+		--disable-ld \
+		--disable-gold \
+		--disable-gprof
+	$(MAKE) -C $(notdir $@)
+	$(MAKE) -C $(notdir $@) install
+	mkdir -p $(dir $@) && touch $@
 
 stamps/build-gcc-musl-stage1: $(GCC_SRCDIR) $(GCC_SRC_GIT) stamps/build-binutils-musl \
                                stamps/build-linux-headers
@@ -907,6 +946,11 @@ stamps/check-gdb-newlib-nano: stamps/build-gcc-newlib-stage2 stamps/build-gdb-ne
 stamps/check-gdb-linux: stamps/build-gcc-linux-stage2 stamps/build-gdb-linux $(SIM_STAMP) stamps/build-dejagnu
 	$(SIM_PREPARE) $(MAKE) -C build-gdb-linux check-gdb -k "RUNTESTFLAGS=--target_board='$(GLIBC_TARGET_BOARDS)'" || true
 	date > $@
+	
+
+stamps/check-gdb-musl: stamps/build-gcc-linux-stage2 stamps/build-gdb-musl $(SIM_STAMP) stamps/build-dejagnu
+	$(SIM_PREPARE) $(MAKE) -C build-gdb-musl check-gdb -k "RUNTESTFLAGS=--target_board='$(MUSL_TARGET_BOARDS)'" || true
+	date > $@
 
 .PHONY: report-gcc-newlib report-gcc-newlib-nano
 report-gcc-newlib: stamps/check-gcc-newlib
@@ -968,6 +1012,18 @@ report-gdb-linux: stamps/check-gdb-linux
 # Fail if there are blank lines in the log file used as input for grep below.
 	if grep '^$$' $(patsubst %,$(srcdir)/test/gdb-linux/%.log,$(GLIBC_MULTILIB_NAMES)); then exit 1; fi
 	if find build-gdb-linux -iname '*.sum' | xargs grep ^FAIL | sort | grep -F -v $(patsubst %,--file=$(srcdir)/test/gdb-linux/%.log,$(GLIBC_MULTILIB_NAMES)); then false; else true; fi
+
+
+.PHONY: report-gdb-musl
+report-gdb-musl: stamps/check-gdb-musl
+	stat $(patsubst %,$(srcdir)/test/gdb-musl/%.log,$(MUSL_MULTILIB_NAMES)) || exit 1
+# Fail if there are blank lines in the log file used as input for grep below.
+	if grep '^$$' $(patsubst %,$(srcdir)/test/gdb-musl/%.log,$(MUSL_MULTILIB_NAMES)); then exit 1; fi
+	if find build-gdb-musl -iname '*.sum' | xargs grep ^FAIL | sort | grep -F -v $(patsubst %,--file=$(srcdir)/test/gdb-musl/%.log,$(MUSL_MULTILIB_NAMES)); then false; else true; fi
+
+
+
+
 
 distclean: clean
 	rm -rf src
